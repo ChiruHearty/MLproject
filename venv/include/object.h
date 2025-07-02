@@ -259,7 +259,7 @@ _Py_ThreadId(void)
     __asm__("movq %%gs:0, %0" : "=r" (tid));  // x86_64 macOSX uses GS
 #elif defined(__x86_64__)
    __asm__("movq %%fs:0, %0" : "=r" (tid));  // x86_64 Linux, BSD uses FS
-#elif defined(__arm__)
+#elif defined(__arm__) && __ARM_ARCH >= 7
     __asm__ ("mrc p15, 0, %0, c13, c0, 3\nbic %0, %0, #3" : "=r" (tid));
 #elif defined(__aarch64__) && defined(__APPLE__)
     __asm__ ("mrs %0, tpidrro_el0" : "=r" (tid));
@@ -1110,8 +1110,13 @@ PyAPI_DATA(PyObject) _Py_NoneStruct; /* Don't use this directly */
 PyAPI_FUNC(int) Py_IsNone(PyObject *x);
 #define Py_IsNone(x) Py_Is((x), Py_None)
 
-/* Macro for returning Py_None from a function */
-#define Py_RETURN_NONE return Py_None
+/* Macro for returning Py_None from a function.
+ * Only treat Py_None as immortal in the limited C API 3.12 and newer. */
+#if defined(Py_LIMITED_API) && Py_LIMITED_API+0 < 0x030c0000
+#  define Py_RETURN_NONE return Py_NewRef(Py_None)
+#else
+#  define Py_RETURN_NONE return Py_None
+#endif
 
 /*
 Py_NotImplemented is a singleton used to signal that an operation is

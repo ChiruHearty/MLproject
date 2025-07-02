@@ -22,6 +22,7 @@ defpath = '/bin:/usr/bin'
 altsep = None
 devnull = '/dev/null'
 
+import errno
 import os
 import sys
 import stat
@@ -35,7 +36,7 @@ __all__ = ["normcase","isabs","join","splitdrive","splitroot","split","splitext"
            "samefile","sameopenfile","samestat",
            "curdir","pardir","sep","pathsep","defpath","altsep","extsep",
            "devnull","realpath","supports_unicode_filenames","relpath",
-           "commonpath", "isjunction","isdevdrive"]
+           "commonpath", "isjunction","isdevdrive","ALLOW_MISSING"]
 
 
 def _get_sep(path):
@@ -401,12 +402,25 @@ symbolic links encountered in the path."""
         curdir = '.'
         pardir = '..'
         getcwd = os.getcwd
+    if strict is ALLOW_MISSING:
+        ignored_error = FileNotFoundError
+        strict = True
+    elif strict:
+        ignored_error = ()
+    else:
+        ignored_error = OSError
+
+    maxlinks = None
 
     # The stack of unresolved path parts. When popped, a special value of None
     # indicates that a symlink target has been resolved, and that the original
     # symlink path can be retrieved by popping again. The [::-1] slice is a
     # very fast way of spelling list(reversed(...)).
     rest = filename.split(sep)[::-1]
+
+    # Number of unprocessed parts in 'rest'. This can differ from len(rest)
+    # later, because 'rest' might contain markers for unresolved symlinks.
+    part_count = len(rest)
 
     # The resolved path, which is absolute throughout this function.
     # Note: getcwd() returns a normalized and symlink-free path.
@@ -418,12 +432,13 @@ symbolic links encountered in the path."""
     # the same links.
     seen = {}
 
-    while rest:
+    while part_count:
         name = rest.pop()
         if name is None:
             # resolved symlink target
             seen[rest.pop()] = path
             continue
+        part_count -= 1
         if not name or name == curdir:
             # current dir
             continue
@@ -436,8 +451,11 @@ symbolic links encountered in the path."""
         else:
             newpath = path + sep + name
         try:
-            st = os.lstat(newpath)
-            if not stat.S_ISLNK(st.st_mode):
+            st_mode = os.lstat(newpath).st_mode
+            if not stat.S_ISLNK(st_mode):
+                if strict and part_count and not stat.S_ISDIR(st_mode):
+                    raise OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR),
+                                  newpath)
                 path = newpath
                 continue
             if newpath in seen:
@@ -453,23 +471,28 @@ symbolic links encountered in the path."""
                 path = newpath
                 continue
             target = os.readlink(newpath)
-        except OSError:
-            if strict:
-                raise
-            path = newpath
+        except ignored_error:
+            pass
+        else:
+            # Resolve the symbolic link
+            if target.startswith(sep):
+                # Symlink target is absolute; reset resolved path.
+                path = sep
+            if maxlinks is None:
+                # Mark this symlink as seen but not fully resolved.
+                seen[newpath] = None
+                # Push the symlink path onto the stack, and signal its specialness
+                # by also pushing None. When these entries are popped, we'll
+                # record the fully-resolved symlink target in the 'seen' mapping.
+                rest.append(newpath)
+                rest.append(None)
+            # Push the unresolved symlink target parts onto the stack.
+            target_parts = target.split(sep)[::-1]
+            rest.extend(target_parts)
+            part_count += len(target_parts)
             continue
-        # Resolve the symbolic link
-        seen[newpath] = None # not resolved symlink
-        if target.startswith(sep):
-            # Symlink target is absolute; reset resolved path.
-            path = sep
-        # Push the symlink path onto the stack, and signal its specialness by
-        # also pushing None. When these entries are popped, we'll record the
-        # fully-resolved symlink target in the 'seen' mapping.
-        rest.append(newpath)
-        rest.append(None)
-        # Push the unresolved symlink target parts onto the stack.
-        rest.extend(target.split(sep)[::-1])
+        # An error occurred and was ignored.
+        path = newpath
 
     return path
 

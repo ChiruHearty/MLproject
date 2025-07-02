@@ -17,7 +17,6 @@ import collections
 import collections.abc
 import concurrent.futures
 import errno
-import functools
 import heapq
 import itertools
 import os
@@ -459,26 +458,30 @@ class BaseEventLoop(events.AbstractEventLoop):
         """Create a Future object attached to the loop."""
         return futures.Future(loop=self)
 
-    def create_task(self, coro, *, name=None, context=None):
+    def create_task(self, coro, *, name=None, context=None, **kwargs):
         """Schedule a coroutine object.
 
         Return a task object.
         """
         self._check_closed()
-        if self._task_factory is None:
-            task = tasks.Task(coro, loop=self, name=name, context=context)
-            if task._source_traceback:
-                del task._source_traceback[-1]
-        else:
-            if context is None:
-                # Use legacy API if context is not needed
-                task = self._task_factory(self, coro)
-            else:
-                task = self._task_factory(self, coro, context=context)
+        if self._task_factory is not None:
+            if context is not None:
+                kwargs["context"] = context
 
+            task = self._task_factory(self, coro, **kwargs)
             task.set_name(name)
 
-        return task
+        else:
+            task = tasks.Task(coro, loop=self, name=name, context=context, **kwargs)
+            if task._source_traceback:
+                del task._source_traceback[-1]
+
+        try:
+            return task
+        finally:
+            # gh-128552: prevent a refcycle of
+            # task.exception().__traceback__->BaseEventLoop.create_task->task
+            del task
 
     def set_task_factory(self, factory):
         """Set a task factory that will be used by loop.create_task().
@@ -486,9 +489,10 @@ class BaseEventLoop(events.AbstractEventLoop):
         If factory is None the default task factory will be set.
 
         If factory is a callable, it should have a signature matching
-        '(loop, coro)', where 'loop' will be a reference to the active
-        event loop, 'coro' will be a coroutine object.  The callable
-        must return a Future.
+        '(loop, coro, **kwargs)', where 'loop' will be a reference to the active
+        event loop, 'coro' will be a coroutine object, and **kwargs will be
+        arbitrary keyword arguments that should be passed on to Task.
+        The callable must return a Task.
         """
         if factory is not None and not callable(factory):
             raise TypeError('task factory must be a callable or None')
@@ -673,8 +677,8 @@ class BaseEventLoop(events.AbstractEventLoop):
 
     def run_forever(self):
         """Run until stop() is called."""
+        self._run_forever_setup()
         try:
-            self._run_forever_setup()
             while True:
                 self._run_once()
                 if self._stopping:
@@ -1140,11 +1144,18 @@ class BaseEventLoop(events.AbstractEventLoop):
                     except OSError:
                         continue
             else:  # using happy eyeballs
-                sock, _, _ = await staggered.staggered_race(
-                    (functools.partial(self._connect_sock,
-                                       exceptions, addrinfo, laddr_infos)
-                     for addrinfo in infos),
-                    happy_eyeballs_delay, loop=self)
+                sock = (await staggered.staggered_race(
+                    (
+                        # can't use functools.partial as it keeps a reference
+                        # to exceptions
+                        lambda addrinfo=addrinfo: self._connect_sock(
+                            exceptions, addrinfo, laddr_infos
+                        )
+                        for addrinfo in infos
+                    ),
+                    happy_eyeballs_delay,
+                    loop=self,
+                ))[0]  # can't use sock, _, _ as it keeks a reference to exceptions
 
             if sock is None:
                 exceptions = [exc for sub in exceptions for exc in sub]
@@ -1287,8 +1298,8 @@ class BaseEventLoop(events.AbstractEventLoop):
                 read = await self.run_in_executor(None, file.readinto, view)
                 if not read:
                     return total_sent  # EOF
-                await proto.drain()
                 transp.write(view[:read])
+                await proto.drain()
                 total_sent += read
         finally:
             if total_sent > 0 and hasattr(file, 'seek'):
@@ -1579,7 +1590,9 @@ class BaseEventLoop(events.AbstractEventLoop):
                     if reuse_address:
                         sock.setsockopt(
                             socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-                    if reuse_port:
+                    # Since Linux 6.12.9, SO_REUSEPORT is not allowed
+                    # on other address families than AF_INET/AF_INET6.
+                    if reuse_port and af in (socket.AF_INET, socket.AF_INET6):
                         _set_reuseport(sock)
                     if keep_alive:
                         sock.setsockopt(
@@ -1870,6 +1883,8 @@ class BaseEventLoop(events.AbstractEventLoop):
         - 'protocol' (optional): Protocol instance;
         - 'transport' (optional): Transport instance;
         - 'socket' (optional): Socket instance;
+        - 'source_traceback' (optional): Traceback of the source;
+        - 'handle_traceback' (optional): Traceback of the handle;
         - 'asyncgen' (optional): Asynchronous generator that caused
                                  the exception.
 

@@ -199,6 +199,7 @@ extern PyObject * _PyType_GetMRO(PyTypeObject *type);
 extern PyObject* _PyType_GetSubclasses(PyTypeObject *);
 extern int _PyType_HasSubclasses(PyTypeObject *);
 PyAPI_FUNC(PyObject *) _PyType_GetModuleByDef2(PyTypeObject *, PyTypeObject *, PyModuleDef *);
+PyAPI_FUNC(PyObject *) _PyType_GetModuleByDef3(PyTypeObject *, PyTypeObject *, PyTypeObject *, PyModuleDef *);
 
 // PyType_Ready() must be called if _PyType_IsReady() is false.
 // See also the Py_TPFLAGS_READY flag.
@@ -230,6 +231,7 @@ extern PyObject* _PyType_GetFullyQualifiedName(PyTypeObject *type, char sep);
 // self->tp_flags = (self->tp_flags & ~mask) | flags;
 extern void _PyType_SetFlags(PyTypeObject *self, unsigned long mask,
                              unsigned long flags);
+extern int _PyType_AddMethod(PyTypeObject *, PyMethodDef *);
 
 // Like _PyType_SetFlags(), but apply the operation to self and any of its
 // subclasses without Py_TPFLAGS_IMMUTABLETYPE set.
